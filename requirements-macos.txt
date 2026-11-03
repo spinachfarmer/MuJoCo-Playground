@@ -1,0 +1,3 @@
+playground==0.2.0
+flax==0.12.8
+brax @ https://github.com/google/brax/archive/c8605294264a7b7546268adbb4beabc9eb624000.tar.gz
