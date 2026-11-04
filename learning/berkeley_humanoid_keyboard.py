@@ -7,7 +7,10 @@ macOS main thread for rendering.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
 import pickle
+import sys
 import threading
 import time
 from pathlib import Path
@@ -27,13 +30,17 @@ from mujoco_playground.config import locomotion_params
 
 ENV_NAME = "BerkeleyHumanoidJoystickFlatTerrain"
 
-COMMAND_UPDATES = {
-    "w": (0, 0.7),
-    "s": (0, -0.5),
-    "a": (1, 0.4),
-    "d": (1, -0.4),
-    "q": (2, 0.4),
-    "e": (2, -0.4),
+MAC_KEY_CODES = {
+    "a": 0,
+    "d": 2,
+    "2": 19,
+    "4": 21,
+    "6": 22,
+    "8": 28,
+    "left": 123,
+    "right": 124,
+    "down": 125,
+    "up": 126,
 }
 
 PUSHES = {
@@ -42,6 +49,37 @@ PUSHES = {
     "4": np.array([0.0, 0.6]),
     "6": np.array([0.0, -0.6]),
 }
+
+
+def make_key_reader():
+    """Return a macOS key-state reader for true hold-to-move controls."""
+    if sys.platform != "darwin":
+        raise RuntimeError("Hold controls currently support macOS only.")
+
+    framework = ctypes.util.find_library("ApplicationServices")
+    application_services = ctypes.CDLL(framework)
+
+    application_services.CGEventSourceKeyState.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_uint16,
+    ]
+    application_services.CGEventSourceKeyState.restype = ctypes.c_bool
+
+    def is_down(key: str) -> bool:
+        return bool(
+            application_services.CGEventSourceKeyState(0, MAC_KEY_CODES[key])
+        )
+
+    return is_down
+
+
+def command_from_keys(is_down) -> np.ndarray:
+    """Build [forward, sideways, turn] from the keys held now."""
+    command = np.zeros(3, dtype=np.float32)
+    command[0] = 0.7 * is_down("up") - 0.5 * is_down("down")
+    command[1] = 0.4 * is_down("a") - 0.4 * is_down("d")
+    command[2] = 0.4 * is_down("left") - 0.4 * is_down("right")
+    return command
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +120,7 @@ def load_policy(environment, checkpoint: Path, reset_state):
 
 def main() -> None:
     args = parse_args()
+    is_down = make_key_reader()
 
     config = registry.get_default_config(ENV_NAME)
     config.impl = "jax"
@@ -95,31 +134,21 @@ def main() -> None:
     policy = load_policy(environment, args.checkpoint, state)
     step = jax.jit(environment.step)
 
-    command = np.zeros(3, dtype=np.float32)
     reset_requested = False
     paused = False
-    pending_push = np.zeros(2, dtype=np.float32)
+    previous_push_keys = set()
+    last_command = np.zeros(3, dtype=np.float32)
     command_lock = threading.Lock()
 
     def on_key(keycode: int) -> None:
-        nonlocal command, pending_push, reset_requested, paused
+        nonlocal reset_requested, paused
         try:
             key = chr(keycode).lower()
         except (ValueError, OverflowError):
             return
 
         with command_lock:
-            if key in COMMAND_UPDATES:
-                index, value = COMMAND_UPDATES[key]
-                command[index] = value
-                print(f"Command [forward, sideways, turn]: {command}")
-            elif key == "x":
-                command.fill(0.0)
-                print(f"Command [forward, sideways, turn]: {command}")
-            elif key in PUSHES:
-                pending_push += PUSHES[key]
-                print(f"Manual push [forward, sideways]: {PUSHES[key]}")
-            elif key == "r":
+            if key == "r":
                 reset_requested = True
                 print("Reset requested.")
             elif key == " ":
@@ -129,7 +158,9 @@ def main() -> None:
     model = environment.mj_model
     display_data = mujoco.MjData(model)
 
-    print("Motion: W/S forward, A/D sideways, Q/E turn, X stop.")
+    print("Hold Up/Down to move or Left/Right to turn.")
+    print("Hold A/D to move sideways.")
+    print("Release the motion keys to stop. X is not required.")
     print("Push: 8/2 forward/backward, 4/6 left/right.")
     print("Press R to reset. Press Space to pause.")
     print("Click the MuJoCo window before you press a control key.")
@@ -141,13 +172,37 @@ def main() -> None:
         show_left_ui=False,
         show_right_ui=False,
     ) as simulation_viewer:
+        with simulation_viewer.lock():
+            simulation_viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+            simulation_viewer.cam.trackbodyid = 1  # torso
+            simulation_viewer.cam.distance = 3.0
+            simulation_viewer.cam.azimuth = 90.0
+            simulation_viewer.cam.elevation = -15.0
+
         while simulation_viewer.is_running():
             step_started = time.monotonic()
 
+            current_command = command_from_keys(is_down)
+            if not np.array_equal(current_command, last_command):
+                print(
+                    "Command [forward, sideways, turn]: "
+                    f"{current_command}"
+                )
+                last_command = current_command.copy()
+
+            current_push_keys = {
+                key for key in PUSHES if is_down(key)
+            }
+            new_push_keys = current_push_keys - previous_push_keys
+            current_push = sum(
+                (PUSHES[key] for key in new_push_keys),
+                start=np.zeros(2, dtype=np.float32),
+            )
+            if new_push_keys:
+                print(f"Manual push [forward, sideways]: {current_push}")
+            previous_push_keys = current_push_keys
+
             with command_lock:
-                current_command = command.copy()
-                current_push = pending_push.copy()
-                pending_push.fill(0.0)
                 should_reset = reset_requested
                 reset_requested = False
                 is_paused = paused
