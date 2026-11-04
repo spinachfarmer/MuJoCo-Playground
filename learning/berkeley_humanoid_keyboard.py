@@ -37,10 +37,10 @@ COMMAND_UPDATES = {
 }
 
 PUSHES = {
-    "i": np.array([0.6, 0.0]),
-    "k": np.array([-0.6, 0.0]),
-    "j": np.array([0.0, 0.6]),
-    "l": np.array([0.0, -0.6]),
+    "8": np.array([0.6, 0.0]),
+    "2": np.array([-0.6, 0.0]),
+    "4": np.array([0.0, 0.6]),
+    "6": np.array([0.0, -0.6]),
 }
 
 
@@ -130,7 +130,7 @@ def main() -> None:
     display_data = mujoco.MjData(model)
 
     print("Motion: W/S forward, A/D sideways, Q/E turn, X stop.")
-    print("Push: I/K forward/backward, J/L left/right.")
+    print("Push: 8/2 forward/backward, 4/6 left/right.")
     print("Press R to reset. Press Space to pause.")
     print("Click the MuJoCo window before you press a control key.")
 
