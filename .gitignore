@@ -1,0 +1,13 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Generated training artifacts belong in Google Drive.
+*.pkl
+*.mp4
+*.mov
+checkpoints/
+artifacts/
+runs/
