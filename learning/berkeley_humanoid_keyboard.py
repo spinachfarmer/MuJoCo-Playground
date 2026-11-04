@@ -27,14 +27,20 @@ from mujoco_playground.config import locomotion_params
 
 ENV_NAME = "BerkeleyHumanoidJoystickFlatTerrain"
 
-KEY_COMMANDS = {
-    "w": np.array([1.0, 0.0, 0.0]),
-    "s": np.array([-0.5, 0.0, 0.0]),
-    "a": np.array([0.0, 0.5, 0.0]),
-    "d": np.array([0.0, -0.5, 0.0]),
-    "q": np.array([0.0, 0.0, 1.0]),
-    "e": np.array([0.0, 0.0, -1.0]),
-    "x": np.array([0.0, 0.0, 0.0]),
+COMMAND_UPDATES = {
+    "w": (0, 0.7),
+    "s": (0, -0.5),
+    "a": (1, 0.4),
+    "d": (1, -0.4),
+    "q": (2, 0.4),
+    "e": (2, -0.4),
+}
+
+PUSHES = {
+    "i": np.array([0.6, 0.0]),
+    "k": np.array([-0.6, 0.0]),
+    "j": np.array([0.0, 0.6]),
+    "l": np.array([0.0, -0.6]),
 }
 
 
@@ -79,6 +85,9 @@ def main() -> None:
 
     config = registry.get_default_config(ENV_NAME)
     config.impl = "jax"
+    # Use manual pushes during the demo. The training environment otherwise
+    # applies a random push every 5 to 10 seconds.
+    config.push_config.enable = False
     environment = registry.load(ENV_NAME, config=config)
 
     rng = jax.random.PRNGKey(args.seed)
@@ -89,19 +98,27 @@ def main() -> None:
     command = np.zeros(3, dtype=np.float32)
     reset_requested = False
     paused = False
+    pending_push = np.zeros(2, dtype=np.float32)
     command_lock = threading.Lock()
 
     def on_key(keycode: int) -> None:
-        nonlocal command, reset_requested, paused
+        nonlocal command, pending_push, reset_requested, paused
         try:
             key = chr(keycode).lower()
         except (ValueError, OverflowError):
             return
 
         with command_lock:
-            if key in KEY_COMMANDS:
-                command = KEY_COMMANDS[key].copy()
+            if key in COMMAND_UPDATES:
+                index, value = COMMAND_UPDATES[key]
+                command[index] = value
                 print(f"Command [forward, sideways, turn]: {command}")
+            elif key == "x":
+                command.fill(0.0)
+                print(f"Command [forward, sideways, turn]: {command}")
+            elif key in PUSHES:
+                pending_push += PUSHES[key]
+                print(f"Manual push [forward, sideways]: {PUSHES[key]}")
             elif key == "r":
                 reset_requested = True
                 print("Reset requested.")
@@ -112,7 +129,8 @@ def main() -> None:
     model = environment.mj_model
     display_data = mujoco.MjData(model)
 
-    print("Controls: W/S forward, A/D sideways, Q/E turn, X stop.")
+    print("Motion: W/S forward, A/D sideways, Q/E turn, X stop.")
+    print("Push: I/K forward/backward, J/L left/right.")
     print("Press R to reset. Press Space to pause.")
     print("Click the MuJoCo window before you press a control key.")
 
@@ -128,6 +146,8 @@ def main() -> None:
 
             with command_lock:
                 current_command = command.copy()
+                current_push = pending_push.copy()
+                pending_push.fill(0.0)
                 should_reset = reset_requested
                 reset_requested = False
                 is_paused = paused
@@ -137,6 +157,13 @@ def main() -> None:
                 state = environment.reset(reset_rng)
 
             if not is_paused:
+                if np.any(current_push):
+                    pushed_qvel = state.data.qvel.at[:2].add(
+                        jp.asarray(current_push)
+                    )
+                    state = state.replace(
+                        data=state.data.replace(qvel=pushed_qvel)
+                    )
                 state.info["command"] = jp.asarray(current_command)
                 rng, action_rng = jax.random.split(rng)
                 action, _ = policy(state.obs, action_rng)
